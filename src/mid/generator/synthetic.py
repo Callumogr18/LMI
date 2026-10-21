@@ -191,6 +191,8 @@ class _MatchBuilder:
     ) -> Event:
         minute, second = divmod(self._clock, 60)
         event = Event(
+            # Saves a match event with an id of seed and 
+            # a 5 digit event number, avg around ~1700 events/pm
             id=f"{self._match_id}-e{len(self._events) + 1:05d}",
             match_id=self._match_id,
             minute=minute,
@@ -204,6 +206,8 @@ class _MatchBuilder:
             end_y=_round(end_y),
             outcome=outcome,
             related_event_id=related,
+            # Save event with a timestamp of kickoff + clock seconds,
+            # divmod returns min, secs from total seconds tracked so far
             ts=KICKOFF + timedelta(seconds=self._clock),
         )
         self._events.append(event)

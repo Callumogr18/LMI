@@ -9,3 +9,9 @@ __pycache__/
 
 # Generated match data
 data/
+
+# Environment variables
+.env
+
+# ai knowledge base
+ai/

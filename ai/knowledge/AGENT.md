@@ -83,7 +83,9 @@ failures" evidence for the Multi-Agent category and keeps the feed live on stage
 
 ## Tech stack
 
-- **Local/dev:** Python ≥ 3.12, managed with **uv** (`uv run`, `uv add`). Entry: `main.py`.
+- **Local/dev:** Python ≥ 3.12, managed with **uv** (`uv run`, `uv add`). Entry: `src/main.py` (→ `mid.cli`).
+- **Libraries so far:** pydantic (models), FastAPI + uvicorn (panel), httpx (LLM calls). Microsoft
+  Agent Framework and Azure SDKs are not yet added.
 - **Agents/orchestration:** Microsoft Agent Framework (Narrator, Critic, Personalizer, Localizer).
 - **LLM:** Microsoft Foundry deployment. **Build local first with a mock LLM, then swap in Foundry.**
 - **Transport:** in-process queue for local dev; Event Hubs optional in cloud.
@@ -109,16 +111,102 @@ failures" evidence for the Multi-Agent category and keeps the feed live on stage
 ## Repo map (current)
 
 ```
-main.py              # placeholder entry point
-pyproject.toml       # uv project, py>=3.12, no deps yet
-src/                 # (empty) implementation lands here
-ai/docs/SPEC-V1.md   # authoritative spec: scope, stages, plan, risks
-ai/knowledge/        # orientation + reference (this file)
+pyproject.toml            # uv project "pl-hackathon", py>=3.12; fastapi, httpx, pydantic, uvicorn;
+                          # dev: pytest, ruff (line-length 100, rules E,F,I,UP,B); hatchling build -> src/mid
+src/main.py               # entry point; delegates to mid.cli.main
+src/mid/__main__.py       # `python -m mid`
+src/mid/cli.py            # argparse CLI: generate (done), replay (Phase 2), serve (Phase 8)
+src/mid/config.py         # frozen Settings loaded from MID_* env vars
+src/mid/models/           # Event, Fact, NarrativeItem + enums (the data contract)
+src/mid/generator/        # synthetic.py (seeded match simulator), storage.py (JSONL read/write)
+src/mid/ingest|stats|producer|critic|agents|pipeline|publisher|web/   # empty stubs (docstring only)
+tests/                    # test_generator.py, test_models.py, test_scaffold.py
+ai/docs/SPEC-V1.md        # authoritative spec: scope, stages, plan, risks
+ai/knowledge/             # orientation + reference (this file)
 ```
 
-Project is greenfield — only the spec exists so far. Build order is in SPEC-V1 §Plan
-(generator/schema/Ingest → Stats/MatchState/Replayer → Producer → Critic → Foundry +
-Personalizer + Localizer + panel → Azure deploy → demo/submit).
+## Build status vs SPEC-V1 §Plan
+
+Build order: generator/schema/Ingest → Stats/MatchState/Replayer → Producer → Critic → Foundry +
+Personalizer + Localizer + panel → Azure deploy → demo/submit.
+
+| Step | State |
+|------|-------|
+| Scaffold (CLI, config, package layout) | Done |
+| Schema (Event, Fact, NarrativeItem) | Done |
+| Synthetic generator + JSONL storage | Done |
+| **Ingest** (schema, dupes, monotonic time, plausibility, `quality_log`) | **Not started** (stub) |
+| Stats, MatchState, Replayer, Producer, Critic, agents, pipeline, publisher, web | Not started (stubs) |
+
+Not yet existing: `MatchState`, Replayer, `NarrationRequest`, `quality_log` model. The
+`replay` and `serve` CLI subcommands are registered but return exit code 1 ("not implemented").
+
+## What exists today
+
+### Scaffold
+- **CLI** (`mid.cli`): `mid generate [--seed N] [--match-id ID] [--output PATH]`. Default seed 1,
+  default output `<MID_DATA_DIR>/match-<seed>.jsonl`.
+- **Settings** (`mid.config`): `MID_LLM_BACKEND` (`mock`|`foundry`, default `mock`), `MID_DATA_DIR`
+  (`data`), `MID_REPLAY_SPEED` (1.0, must be > 0), `MID_NARRATION_COOLDOWN_MINUTES` (3.0),
+  `MID_MAX_NARRATOR_RETRIES` (1). Validated in `__post_init__`. This is the mock→Foundry switch
+  and the "config-driven thresholds" enterprise-controls evidence.
+
+### Data contract (`mid.models`) — everything downstream depends on this
+- **Enums:** `EventType` (pass, shot, carry, dribble, tackle, interception, clearance, foul, save,
+  goal, card), `Outcome` (success, failure, goal, saved, blocked, off_target, neutral),
+  `Audience` (analyst|fan), `Status` (draft|approved|rejected|fallback).
+- **Event:** `extra="forbid"`, `frozen=True`. minute >= 0, second 0..59, non-empty id/match_id/team;
+  player, coords, outcome, related_event_id optional. This is Ingest's first (schema) gate.
+- **Fact:** frozen. `source_event_ids` has `min_length=1` — a Fact with no source events cannot
+  exist. `value` is a plain `float`; text-like info (e.g. player names) goes in `entity_refs`.
+- **NarrativeItem:** mutable (status changes). `fact_ids` has `min_length=1` — a line must cite at
+  least one Fact. Defaults: `status=DRAFT`, `degraded=False`.
+- **Provenance chain enforced by types:** Event → Fact (`source_event_ids`) → NarrativeItem
+  (`fact_ids`). The Critic can verify by lookup rather than trust. Don't weaken these constraints.
+
+### Generator (`mid.generator`)
+- `generate_match(seed, match_id=None) -> list[Event]`; `write_match` / `read_match` for JSONL
+  (one Event per line; reading re-validates every line).
+- **Model:** pitch 120x80, teams `home`/`away` alternate possessions (4–15 actions each); pass
+  success falls with distance (clamped 0.5–0.95); 25% carry after a pass; 30% shot chance in box;
+  shot outcomes 12% goal / 35% saved / 20% blocked / rest off target; 7% foul on turnover, 25%
+  card on foul. Sides swap at half-time; each half is 45 min + random stoppage (~90–100 min total).
+- **Links:** goal/save events point to their shot via `related_event_id`; a pass links to the
+  previous pass; a shot links to its setup pass.
+- Players are anonymous labels (`Home #07`; keeper is `#01`). Coordinates clamped and rounded to 1 dp.
+- **Generates clean events only** — no duplicates, out-of-order times, or off-pitch coordinates.
+  Ingest's known-fault fixture (SPEC §Testing) needs a fault-injection path or hand-built fixture.
+
+### How seeding works
+- `generate_match` builds `_MatchBuilder(random.Random(seed), match_id or f"match-{seed}")`. The
+  RNG is a **private instance** (not global `random`), and every random decision goes through it
+  (match length, pass targets, success rolls, shot/foul/card rolls, player choice, clock steps).
+- Timestamps are `KICKOFF + _clock` seconds, with `KICKOFF = 2026-10-20 15:00 UTC` fixed — no
+  `datetime.now()`, `uuid`, or global RNG anywhere. Same seed → byte-identical JSONL.
+- Event ids are `<match_id>-e00001…`; `match_id` changes ids but not gameplay.
+- **Caveat:** seeds are not stable across generator code changes. Changing any probability
+  constant or adding/removing an `rng` call shifts the whole draw sequence, so seed 1 yields a
+  different match. Tests only check same-seed equality, not fixed content. For the demo, commit
+  or save the generated JSONL rather than regenerating, and update the end-to-end snapshot
+  whenever generator logic changes.
+
+### Tests
+- `test_generator.py`: determinism (events + file bytes), different seeds differ, JSONL round-trip,
+  time order, unique ids, coords on pitch, related ids point backward, goal/save↔shot linkage,
+  ~90 min length, realistic shape (1000–4000 events, >100 passes per team), CLI generate.
+- `test_models.py`: JSON round-trips, frozen/forbid, invalid values rejected, Fact/Narrative
+  provenance minimums, enum vocab matches spec.
+- `test_scaffold.py`: `--help`, subcommand registration, Settings defaults/validation/from_env.
+
+### Commands
+- `uv run mid`-style CLI: `uv run python -m mid generate --seed 1`
+- Tests: `uv run pytest`
+- Lint: `uv run ruff check src tests` (ruff has no `run` subcommand; `uv run ruff check <paths>`)
+
+## Next up
+Ingest: read `Event`s, emit clean events plus `quality_log` entries (duplicates, monotonic time,
+physical plausibility, corrections), with a known-fault fixture. Then Phase 2: Stats (Facts with
+`source_event_ids`), `MatchState`, Replayer.
 
 ## References
 - Spec: `ai/docs/SPEC-V1.md`

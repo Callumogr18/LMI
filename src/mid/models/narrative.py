@@ -8,6 +8,7 @@ from mid.models.enums import Audience, Status
 class NarrativeItem(BaseModel):
     """A line of commentary. Status moves draft -> approved | rejected | fallback via the Critic."""
 
+    # Don't freeze as we expect critic to modify status later  
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
