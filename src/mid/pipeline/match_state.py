@@ -2,6 +2,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from mid.models import Event, EventType
+from mid.stats.calculations import possession_pct
 
 
 @dataclass
@@ -22,6 +23,7 @@ class MatchState:
     
     # Possession tracking
     home_possession_pct: float = 50.0
+    away_possession_pct: float = 50.0
     total_passes: int = 0
     home_passes: int = 0
     away_passes: int = 0
@@ -76,7 +78,7 @@ class MatchState:
                 self.home_passes += 1
             else:
                 self.away_passes += 1
-            self._update_possession()
+            self.home_possession_pct, self.away_possession_pct = possession_pct(self.home_passes, self.away_passes)
         
         elif event.type == EventType.SHOT:
             if event.team == "home":
@@ -134,11 +136,6 @@ class MatchState:
                 self.home_saves += 1
             else:
                 self.away_saves += 1
-    
-    def _update_possession(self):
-        # Update possession percentage based on pass counts
-        if self.total_passes > 0:
-            self.home_possession_pct = (self.home_passes / self.total_passes) * 100
     
     def get_score(self):
         # Return formatted score string
