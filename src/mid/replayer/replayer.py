@@ -12,7 +12,7 @@ async def replay_match(
     match_path: Path,
     queue: asyncio.Queue[models.Event],
     settings: config.Settings,
-    match_state: MatchState | None = None,
+    match_state: MatchState,
 ):
     """
     Replay events from match file and emit at interval specified by settings.
