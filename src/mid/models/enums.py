@@ -17,6 +17,27 @@ class EventType(StrEnum):
     CARD = "card"
 
 
+class FactKind(StrEnum):
+    POSSESSION_SHARE = "possession_share"
+    PASS_COMPLETION = "pass_completion"
+    PASS_DISTANCE = "pass_distance"
+    PASS_DIFFICULTY = "pass_difficulty"
+    PRESSURE = "pressure"
+    TEMPO = "tempo"
+    SHOT_CONVERSION = "shot_conversion"
+
+
+class FactScope(StrEnum):
+    HOME = "home"
+    AWAY = "away"
+    MATCH = "match"
+
+
+class CardColor(StrEnum):
+    YELLOW = "yellow"
+    RED = "red"
+
+
 class Outcome(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"

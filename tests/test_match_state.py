@@ -1,7 +1,8 @@
 """Tests for MatchState."""
 
+import pytest
 from datetime import UTC, datetime
-from mid.models import Event, EventType, Outcome
+from mid.models import CardColor, Event, EventType, FactKind, FactScope, Outcome
 from mid.pipeline import MatchState
 
 
@@ -332,3 +333,66 @@ def test_match_state_get_team_event_count():
     
     assert state.get_team_event_count("home", EventType.PASS) == 5
     assert state.get_team_event_count("away", EventType.PASS) == 0
+
+
+def test_match_state_accumulates_facts_with_source_events():
+    """Facts are recomputed as events arrive and trace back to event IDs."""
+    state = MatchState(match_id="match-1")
+    assert state.get_fact(FactKind.POSSESSION_SHARE, FactScope.HOME) is None
+
+    ids = []
+    for i, team in enumerate(["home", "home", "away"]):
+        event = Event(
+            id=f"match-1-e{i:05d}",
+            match_id="match-1",
+            minute=i,
+            second=0,
+            type=EventType.PASS,
+            team=team,
+            player=f"{team} #01",
+            x=60.0,
+            y=40.0,
+            end_x=70.0,
+            end_y=40.0,
+            outcome=Outcome.SUCCESS,
+            ts=datetime(2026, 10, 20, 15, i, tzinfo=UTC),
+        )
+        ids.append(event.id)
+        state.update(event)
+
+    home = state.get_fact(FactKind.POSSESSION_SHARE, FactScope.HOME)
+    assert home.value == pytest.approx(200 / 3)
+    assert home.source_event_ids == ids
+    assert home.minute == 2
+    assert state.get_fact(FactKind.PASS_COMPLETION, FactScope.AWAY).value == 100.0
+    assert state.get_fact(FactKind.TEMPO).entity_refs == []
+    assert len(state.facts) == len({f.id for f in state.facts.values()})
+
+
+def test_match_state_counts_red_and_yellow_cards():
+    state = MatchState(match_id="match-1")
+    for i, color in enumerate([CardColor.RED, CardColor.YELLOW, None]):
+        state.update(Event(
+            id=f"match-1-e{i:05d}", match_id="match-1", minute=1, second=i,
+            type=EventType.CARD, team="away", player="Away #02", card_color=color,
+            ts=datetime(2026, 10, 20, 15, 1, i, tzinfo=UTC),
+        ))
+    assert (state.away_red_cards, state.away_yellow_cards) == (1, 2)
+    assert state.get_team_event_count("away", EventType.CARD) == 3
+
+
+def test_fact_ids_are_stable_and_log_is_append_only():
+    state = MatchState(match_id="match-1")
+    seen = {}
+    for i, team in enumerate(["home", "away", "home"]):
+        state.update(Event(
+            id=f"match-1-e{i:05d}", match_id="match-1", minute=5, second=i,
+            type=EventType.PASS, team=team, player="p", x=60.0, y=40.0, end_x=70.0, end_y=40.0,
+            outcome=Outcome.SUCCESS, ts=datetime(2026, 10, 20, 15, 5, i, tzinfo=UTC),
+        ))
+        seen[state.get_fact(FactKind.POSSESSION_SHARE, FactScope.HOME).id] = state.get_fact(FactKind.POSSESSION_SHARE, FactScope.HOME).value
+    assert len(seen) == 3
+    ids = [f.id for f in state.fact_log]
+    assert len(ids) == len(set(ids))
+    for fact_id, value in seen.items():
+        assert state.facts_by_id[fact_id].value == value

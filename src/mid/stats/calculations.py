@@ -1,33 +1,46 @@
 import math
 
-from mid.models import Event, EventType, Fact, Outcome
+from mid.models import Event, EventType, Fact, FactKind, FactScope, Outcome
+from mid.models.pitch import PITCH_LENGTH, attack_direction
 
 TEAMS = ("home", "away")
-PITCH_LENGTH = 120.0
 HALF_MINUTE = 45
 LONG_PASS = 40.0
 FINAL_THIRD_X = PITCH_LENGTH * 2 / 3
 DEFENSIVE_ACTIONS = (EventType.TACKLE, EventType.INTERCEPTION, EventType.CLEARANCE, EventType.FOUL)
 
-
-def _fact(kind: str, team: str, value: float, unit: str, sources: list[Event]) -> Fact:
+def _fact(
+    kind: FactKind, team: str, value: float, unit: str, sources: list[Event], as_of: Event | None = None
+) -> Fact:
     if team not in TEAMS:
         raise ValueError(f"team must be one of {TEAMS}, got {team!r}")
-    return _build_fact(kind, team, [team], value, unit, sources)
+    return _build_fact(kind, FactScope(team), [team], value, unit, sources, as_of)
 
 
 """
 Match-level facts for tempo stat
 """
-def _match_fact(kind: str, value: float, unit: str, sources: list[Event]) -> Fact:
-    return _build_fact(kind, "match", [], value, unit, sources)
+def _match_fact(
+    kind: FactKind, value: float, unit: str, sources: list[Event], as_of: Event | None = None
+) -> Fact:
+    return _build_fact(kind, FactScope.MATCH, [], value, unit, sources, as_of)
 
 
-def _build_fact(kind: str, scope: str, refs: list[str], value: float, unit: str, sources: list[Event]) -> Fact:
+def _build_fact(
+    kind: FactKind,
+    scope: FactScope,
+    refs: list[str],
+    value: float,
+    unit: str,
+    sources: list[Event],
+    as_of: Event | None = None,
+) -> Fact:
+    # The id is tied to the last event seen when the Fact was computed, so it is stable per state
     minute = max(e.minute for e in sources)
     return Fact(
-        id=f"{sources[0].match_id}-{kind}-{scope}-m{minute}",
+        id=f"{kind}-{scope}-{(as_of or sources[-1]).id}",
         kind=kind,
+        scope=scope,
         value=value,
         unit=unit,
         entity_refs=refs,
@@ -45,15 +58,14 @@ def _pass_length(event: Event) -> float:
     return math.hypot(event.end_x - event.x, event.end_y - event.y)
 
 
-def _attack_direction(team: str, minute: int) -> int:
-    # +1 when the team attacks towards x=120, -1 towards x=0. Sides swap at half time.
-    base = 1 if team == "home" else -1
-    return -base if minute >= HALF_MINUTE else base
+def _period(event: Event) -> int:
+    # Events without an explicit period (older data) fall back to the 45th-minute boundary
+    return event.period or (2 if event.minute >= HALF_MINUTE else 1)
 
 
-def _attacking_x(x: float, team: str, minute: int) -> float:
+def _attacking_x(x: float, event: Event) -> float:
     # x measured from the team's own goal line, so larger always means closer to the opponent goal.
-    return x if _attack_direction(team, minute) > 0 else PITCH_LENGTH - x
+    return x if attack_direction(event.team, _period(event)) > 0 else PITCH_LENGTH - x
 
 
 def possession_pct(home_passes: int, away_passes: int) -> tuple[float, float]:
@@ -71,7 +83,7 @@ def calc_possession_share(events: list[Event]) -> list[Fact]:
         return []
     home = [e for e in passes if e.team == "home"]
     shares = dict(zip(TEAMS, possession_pct(len(home), len(passes) - len(home))))
-    return [_fact("possession_share", t, shares[t], "%", passes) for t in TEAMS]
+    return [_fact(FactKind.POSSESSION_SHARE, t, shares[t], "%", passes, events[-1]) for t in TEAMS]
 
 
 def calc_pass_completion(events: list[Event]) -> list[Fact]:
@@ -81,7 +93,7 @@ def calc_pass_completion(events: list[Event]) -> list[Fact]:
         passes = [e for e in events if e.type == EventType.PASS and e.team == team]
         if passes:
             done = sum(e.outcome == Outcome.SUCCESS for e in passes)
-            facts.append(_fact("pass_completion", team, done / len(passes) * 100, "%", passes))
+            facts.append(_fact(FactKind.PASS_COMPLETION, team, done / len(passes) * 100, "%", passes, events[-1]))
     return facts
 
 
@@ -92,15 +104,15 @@ def calc_pass_distance(events: list[Event]) -> list[Fact]:
         passes = [e for e in events if e.type == EventType.PASS and e.team == team and _has_path(e)]
         if passes:
             mean = sum(_pass_length(e) for e in passes) / len(passes)
-            facts.append(_fact("pass_distance", team, mean, "m", passes))
+            facts.append(_fact(FactKind.PASS_DISTANCE, team, mean, "m", passes, events[-1]))
     return facts
 
 
 def _pass_difficulty(event: Event) -> float:
     # 0-1 score: 50% length, 30% forward progress, 20% ending in the final third
     length = min(_pass_length(event) / LONG_PASS, 1.0)
-    start = _attacking_x(event.x, event.team, event.minute)
-    end = _attacking_x(event.end_x, event.team, event.minute)
+    start = _attacking_x(event.x, event)
+    end = _attacking_x(event.end_x, event)
     forward = min(max(end - start, 0.0) / LONG_PASS, 1.0)
     return 0.5 * length + 0.3 * forward + 0.2 * (end >= FINAL_THIRD_X)
 
@@ -112,7 +124,7 @@ def calc_pass_difficulty(events: list[Event]) -> list[Fact]:
         passes = [e for e in events if e.type == EventType.PASS and e.team == team and _has_path(e)]
         if passes:
             mean = sum(_pass_difficulty(e) for e in passes) / len(passes)
-            facts.append(_fact("pass_difficulty", team, mean, "score", passes))
+            facts.append(_fact(FactKind.PASS_DIFFICULTY, team, mean, "score", passes, events[-1]))
     return facts
 
 
@@ -129,10 +141,10 @@ def calc_pressure(events: list[Event]) -> list[Fact]:
             if e.type in DEFENSIVE_ACTIONS
             and e.team == team
             and e.x is not None
-            and _attacking_x(e.x, team, e.minute) > PITCH_LENGTH / 2
+            and _attacking_x(e.x, e) > PITCH_LENGTH / 2
         ]
         if actions:
-            facts.append(_fact("pressure", team, len(actions) / elapsed, "actions/min", actions))
+            facts.append(_fact(FactKind.PRESSURE, team, len(actions) / elapsed, "actions/min", actions, last))
     return facts
 
 
@@ -144,7 +156,7 @@ def calc_tempo(events: list[Event], window_minutes: int | None = None) -> list[F
     if window_minutes is not None:
         events = [e for e in events if e.minute > last.minute - window_minutes]
     elapsed = window_minutes or max(last.minute + last.second / 60, 1.0)
-    return [_match_fact("tempo", len(events) / elapsed, "events/min", events)]
+    return [_match_fact(FactKind.TEMPO, len(events) / elapsed, "events/min", events, last)]
 
 
 def calc_shot_conversion(events: list[Event]) -> list[Fact]:
@@ -154,5 +166,33 @@ def calc_shot_conversion(events: list[Event]) -> list[Fact]:
         shots = [e for e in events if e.type == EventType.SHOT and e.team == team]
         if shots:
             goals = sum(e.outcome == Outcome.GOAL for e in shots)
-            facts.append(_fact("shot_conversion", team, goals / len(shots) * 100, "%", shots))
+            facts.append(_fact(FactKind.SHOT_CONVERSION, team, goals / len(shots) * 100, "%", shots, events[-1]))
     return facts
+
+
+# (calculator, event types that change its result or None for any, whether elapsed time matters)
+CALCULATORS = (
+    (calc_possession_share, {EventType.PASS}, False),
+    (calc_pass_completion, {EventType.PASS}, False),
+    (calc_pass_distance, {EventType.PASS}, False),
+    (calc_pass_difficulty, {EventType.PASS}, False),
+    (calc_pressure, set(DEFENSIVE_ACTIONS), True),
+    (calc_tempo, None, True),
+    (calc_shot_conversion, {EventType.SHOT}, False),
+)
+
+
+def calc_all(
+    events: list[Event], event_type: EventType | None = None, new_minute: bool = True
+) -> list[Fact]:
+    # Run the calculators affected by the latest event; with no event_type, run every calculator.
+    # Time-dependent calculators (rates per minute) also refresh when the match minute advances.
+    return [
+        fact
+        for calculator, triggers, time_dependent in CALCULATORS
+        if event_type is None
+        or triggers is None
+        or event_type in triggers
+        or (time_dependent and new_minute)
+        for fact in calculator(events)
+    ]

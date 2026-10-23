@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from mid.models import Audience, Event, EventType, Fact, NarrativeItem, Outcome, Status
+from mid.models import Audience, Event, EventType, Fact, FactKind, FactScope, NarrativeItem, Outcome, Status
 
 TS = datetime(2026, 10, 20, 15, 0, tzinfo=UTC)
 
@@ -32,7 +32,8 @@ def make_event(**overrides) -> Event:
 def make_fact(**overrides) -> Fact:
     fields = {
         "id": "f1",
-        "kind": "pass_distance",
+        "kind": FactKind.PASS_DISTANCE,
+        "scope": FactScope.HOME,
         "value": 21.4,
         "unit": "m",
         "entity_refs": ["Player 7"],
@@ -92,7 +93,7 @@ def test_fact_requires_source_events() -> None:
 
 
 def test_fact_entity_refs_default_to_empty() -> None:
-    fact = Fact(id="f2", kind="possession_share", value=54.0, source_event_ids=["e1"], minute=5)
+    fact = Fact(id="f2", kind=FactKind.POSSESSION_SHARE, scope=FactScope.MATCH, value=54.0, source_event_ids=["e1"], minute=5)
     assert fact.entity_refs == [] and fact.unit is None
 
 

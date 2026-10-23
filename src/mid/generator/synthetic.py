@@ -9,10 +9,8 @@ import math
 import random
 from datetime import UTC, datetime, timedelta
 
-from mid.models import Event, EventType, Outcome
-
-PITCH_LENGTH = 120.0
-PITCH_WIDTH = 80.0
+from mid.models import CardColor, Event, EventType, Outcome
+from mid.models.pitch import PITCH_LENGTH, PITCH_WIDTH, attack_direction
 BOX_DEPTH = 18.0
 BOX_WIDTH_MARGIN = 18.0
 HALF_SECONDS = 45 * 60
@@ -30,6 +28,7 @@ SHOT_CHANCE_IN_BOX = 0.3
 CARRY_CHANCE = 0.25
 FOUL_CHANCE_ON_TURNOVER = 0.07
 CARD_CHANCE_ON_FOUL = 0.25
+RED_CARD_SHARE = 0.1
 GOAL_SHARE = 0.12
 SAVED_SHARE = 0.35
 BLOCKED_SHARE = 0.20
@@ -46,6 +45,7 @@ class _MatchBuilder:
         self._match_id = match_id
         self._events: list[Event] = []
         self._clock = 0  # whole match seconds
+        self._period = 1
 
     def run(self) -> list[Event]:
         rng = self._rng
@@ -62,12 +62,13 @@ class _MatchBuilder:
             if not second_half and self._clock >= first_half_end:
                 self._clock = second_half_start
                 second_half = True
+                self._period = 2
 
             if not kickoff:
                 self._recover(team, x, y)
             kickoff = False
 
-            direction = _attack_direction(team, second_half)
+            direction = attack_direction(team, self._period)
             x, y, lost_ball = self._possession(team, direction, x, y)
             losing_team = team
             team = _other(team)
@@ -166,7 +167,8 @@ class _MatchBuilder:
         player = self._player(team)
         foul = self._add(EventType.FOUL, team, player, x, y)
         if rng.random() < CARD_CHANCE_ON_FOUL:
-            self._add(EventType.CARD, team, player, x, y, related=foul.id)
+            color = CardColor.RED if rng.random() < RED_CARD_SHARE else CardColor.YELLOW
+            self._add(EventType.CARD, team, player, x, y, related=foul.id, card_color=color)
         self._clock += rng.randint(3, 10)
 
     def _player(self, team: str) -> str:
@@ -188,6 +190,7 @@ class _MatchBuilder:
         end_y: float | None = None,
         outcome: Outcome | None = None,
         related: str | None = None,
+        card_color: CardColor | None = None,
     ) -> Event:
         minute, second = divmod(self._clock, 60)
         event = Event(
@@ -206,6 +209,8 @@ class _MatchBuilder:
             end_y=_round(end_y),
             outcome=outcome,
             related_event_id=related,
+            period=self._period,
+            card_color=card_color,
             # Save event with a timestamp of kickoff + clock seconds,
             # divmod returns min, secs from total seconds tracked so far
             ts=KICKOFF + timedelta(seconds=self._clock),
@@ -216,12 +221,6 @@ class _MatchBuilder:
 
 def _other(team: str) -> str:
     return TEAMS[1] if team == TEAMS[0] else TEAMS[0]
-
-
-def _attack_direction(team: str, second_half: bool) -> int:
-    """+1 when the team attacks towards x=120, -1 towards x=0. Sides swap at half time."""
-    base = 1 if team == TEAMS[0] else -1
-    return -base if second_half else base
 
 
 def _clamp_x(value: float) -> float:

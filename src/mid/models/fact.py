@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mid.models.enums import FactKind, FactScope
+
 
 class Fact(BaseModel):
     """A value computed by the stats stage. Narration may only cite Facts by id."""
@@ -9,7 +11,8 @@ class Fact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(min_length=1)
-    kind: str = Field(min_length=1)
+    kind: FactKind
+    scope: FactScope
     value: float
     unit: str | None = None
     entity_refs: list[str] = Field(default_factory=list)

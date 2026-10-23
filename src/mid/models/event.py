@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mid.models.enums import EventType, Outcome
+from mid.models.enums import CardColor, EventType, Outcome
 
 
 class Event(BaseModel):
@@ -24,5 +24,7 @@ class Event(BaseModel):
     end_x: float | None = None
     end_y: float | None = None
     outcome: Outcome | None = None
+    period: int | None = Field(default=None, ge=1, le=2)
+    card_color: CardColor | None = None
     related_event_id: str | None = None
     ts: datetime
